@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bahn-Abfahrten</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1b1f24;--muted:#6b7280;--accent:#e2001a;--line:#e5e7eb;--ok:#15803d;--late:#dc2626;--warn:#b45309}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--text:#e6e8eb;--muted:#9aa3ad;--line:#2a2f38}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{background:var(--accent);color:#fff;padding:14px 16px}
+h1{margin:0 0 10px;font-size:20px}
+.tabs{display:flex;gap:8px}
+.tabs button{background:rgba(255,255,255,.18);color:#fff;border:0;padding:7px 14px;border-radius:999px;cursor:pointer;font-weight:600}
+.tabs button.on{background:#fff;color:var(--accent)}
+main{max-width:1000px;margin:0 auto;padding:16px}
+.bar{display:flex;gap:8px;margin-bottom:10px;position:relative}
+.bar input{flex:1;min-width:0;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text)}
+.bar button{font:inherit;background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 18px;font-weight:600;cursor:pointer}
+.results{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden}
+.results button{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line);padding:10px 12px;color:var(--text);font:inherit;cursor:pointer}
+.results button:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.results button span{color:var(--muted);font-size:13px}
+.station{font-size:18px;font-weight:700;margin:6px 0 10px}
+.board{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+tr.row{cursor:pointer}
+tr.row:hover{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.time{font-variant-numeric:tabular-nums;font-weight:700}
+.late{color:var(--late);font-weight:600}
+.cancel{color:var(--late);text-decoration:line-through}
+.badge{display:inline-block;padding:2px 8px;border-radius:6px;background:var(--line);font-weight:700;font-size:13px}
+.badge.lf{background:var(--accent);color:#fff}
+.msgs{color:var(--warn);font-size:13px}
+.muted{color:var(--muted);font-size:13px}
+.msg{padding:24px;color:var(--muted);text-align:center}
+.note{color:var(--muted);font-size:12px;margin-top:12px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;z-index:9}
+#modal[hidden]{display:none}
+.card{background:var(--card);border-radius:14px;max-width:520px;width:100%;max-height:90vh;overflow:auto;padding:20px;position:relative}
+#close{position:absolute;right:12px;top:8px;background:none;border:0;font-size:26px;color:var(--muted);cursor:pointer}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:12px 0}
+.kv span:nth-child(odd){color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🚆 Bahn-Abfahrten</h1>
+  <div class="tabs">
+    <button data-mode="dep" class="on">Abfahrten</button>
+    <button data-mode="arr">Ankünfte</button>
+  </div>
+</header>
+
+<main>
+  <div class="bar">
+    <input id="q" placeholder="Bahnhof eingeben, z. B. Nürnberg Hbf" autocomplete="off">
+    <button id="search">Suchen</button>
+  </div>
+  <div id="found"></div>
+  <div id="title"></div>
+  <div class="board"><table>
+    <thead><tr id="head"></tr></thead>
+    <tbody id="board"><tr><td colspan="5" class="msg">Bahnhof eingeben, um Abfahrten zu sehen</td></tr></tbody>
+  </table></div>
+  <p class="note">Quelle: Deutsche Bahn AG (CC BY 4.0), über infranode.dev. Aktualisierung alle 60 Sekunden.</p>
+</main>
+
+<div id="modal" hidden><div class="card"><button id="close" aria-label="Schließen">×</button><div id="detail"></div></div></div>
+
+<script>
+const INFRA="https://infranode.dev/api/v1";
+const BAHN_SEARCH="/.netlify/functions/bahn-orte";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const tm=iso=>iso?new Date(iso).toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}):"–";
+
+// Verspätungsursachen nach Richtlinie 420.9001 (Kodierliste DB InfraGO AG)
+const VERSP_CODES={
+  10:"Fahrplanerstellung",12:"Fehldisposition",13:"Vorbereitung",14:"Anfangsverspätung DB InfraGO AG",
+  18:"Betriebliches Personal DB InfraGO AG",19:"Sonstiges Betriebsdurchführung DB InfraGO AG",
+  20:"Stromversorgungsanlagen (Fahrstrom)",21:"Telekommunikationsanlagen",22:"Bauwerke",23:"Fahrbahn",
+  24:"Bahnübergangsicherungsanlagen",25:"Leit- und Sicherungstechnik",26:"Weichen",
+  27:"Fahrzeuge DB InfraGO AG",28:"Technisches Personal DB InfraGO AG",29:"Sonstiges Technik DB InfraGO AG",
+  30:"Mängellangsamfahrstelle",31:"Bauarbeiten",32:"Unregelmäßigkeiten bei Bauarbeiten",
+  40:"Nächster EIU",41:"Vorheriger EIU",46:"Anlagen DB Energie",
+  47:"Anlagen Personenbahnhöfe",48:"Personal Personenbahnhöfe / DB Energie",49:"Sonstiges Personenbahnhöfe / DB Energie",
+  50:"Haltezeitüberschreitung",51:"Antrag EVU",52:"Ladearbeiten",53:"Unregelmäßigkeiten an der Ladung",
+  54:"Verkehrliche Zugvorbereitung",57:"Keine Meldung durch EVU",58:"Verkehrliches Personal EVU",
+  59:"Sonstige verkehrliche Gründe EVU",60:"Umlauf- und Einsatzplanung",61:"Zugbildung durch EVU",
+  62:"Reisezugwagen",63:"Güterwagen",64:"Triebfahrzeuge",68:"Technisches Personal EVU",
+  69:"Sonstiges Fahrzeuge EVU",70:"Nächstes EVU",71:"Vorheriges EVU",
+  80:"Externe Einflüsse bei externen EIU",81:"Streik (Anordnung NLZ)",82:"Witterung",83:"Schmierfilm",
+  84:"Behörden",85:"Fremdeinwirkung",90:"Gefährliches Ereignis",
+  91:"Zugfolge (Vorrang anderer Züge)",92:"Zugfolge (Zug war verspätet)",93:"Umlauf",94:"Anschluss",
+  95:"Flügeln",96:"Weitere Untersuchung erforderlich"
+};
+function msgInfo(m){
+  if(typeof m==="string") return {title:m,time:""};
+  let title;
+  if(m.type==="d") title="Verspätungsursache: "+(VERSP_CODES[m.code]||"Sonstige Ursache");
+  else if(m.type==="q") title="Qualitätsmeldung";
+  else if(m.type==="f") title="Störung";
+  else title="Hinweis";
+  return {title,time:m.timestamp?tm(m.timestamp):""};
+}
+function uniqMsgs(list){
+  const map=new Map();
+  for(const m of list||[]){
+    const k=(m.type||"")+"|"+(m.code||"")+"|"+(m.text||"");
+    const e=map.get(k);
+    if(e) e.n++; else map.set(k,{m,n:1});
+  }
+  return [...map.values()].map(({m,n})=>({...msgInfo(m),n}));
+}
+
+let mode="dep",eva=null,rows=[],timer;
+
+// Bahnhof per Name suchen; liefert Name und EVA-Nummer
+async function findStations(q){
+  let r;
+  try{
+    r=await fetch(`${BAHN_SEARCH}?suchbegriff=${encodeURIComponent(q)}&typ=ALL&limit=10`,{headers:{accept:"application/json"}});
+  }catch(e){
+    throw new Error("Die Bahnhofssuche ist von dieser Seite aus nicht erreichbar (Browser blockiert die Verbindung).");
+  }
+  if(!r.ok) throw new Error("Bahnhofssuche fehlgeschlagen (Status "+r.status+")");
+  const list=await r.json();
+  return (Array.isArray(list)?list:[])
+    .map(x=>({name:x.name,eva:x.extId||x.evaNumber,type:x.type}))
+    .filter(x=>x.eva && !["ADR","POI"].includes(x.type));
+}
+
+async function searchStations(){
+  const q=$("q").value.trim();
+  const box=$("found");
+  if(!q){box.innerHTML='<div class="muted">Bitte einen Bahnhofsnamen eingeben</div>';return}
+  box.innerHTML='<div class="muted">Suche läuft …</div>';
+  try{
+    const list=await findStations(q);
+    if(!list.length){box.innerHTML='<div class="muted">Kein Bahnhof gefunden</div>';return}
+    if(list.length===1){box.innerHTML="";select(list[0].eva,list[0].name);return}
+    box.innerHTML='<div class="results">'+list.map(s=>`<button data-eva="${esc(s.eva)}" data-name="${esc(s.name)}">${esc(s.name)} <span>· ${esc(s.eva)}</span></button>`).join("")+'</div>';
+  }catch(e){box.innerHTML=`<div class="muted">${esc(e.message)}</div>`}
+}
+$("search").onclick=searchStations;
+$("q").onkeydown=e=>{if(e.key==="Enter")searchStations()};
+$("found").onclick=e=>{
+  const b=e.target.closest("button[data-eva]");if(!b)return;
+  $("found").innerHTML="";
+  select(b.dataset.eva,b.dataset.name);
+};
+
+function select(id,name){
+  eva=id;
+  $("title").innerHTML=`<div class="station">${esc(name)}</div>`;
+  clearInterval(timer);loadBoard();timer=setInterval(loadBoard,60000);
+}
+
+async function loadBoard(){
+  if(!eva) return;
+  const isDep=mode==="dep";
+  $("head").innerHTML=isDep
+    ?"<th>Zeit</th><th>Zug</th><th>Ziel</th><th>Gleis</th><th>Hinweise</th>"
+    :"<th>Zeit</th><th>Zug</th><th>Herkunft</th><th>Gleis</th><th>Hinweise</th>";
+  try{
+    const r=await fetch(`${INFRA}/stations/${encodeURIComponent(eva)}/${isDep?"departures":"arrivals"}`);
+    if(!r.ok) throw new Error("Fehler beim Laden (Status "+r.status+")");
+    const d=(await r.json()).data||{};
+    if(d.source_status==="disabled") throw new Error("Datenquelle derzeit deaktiviert");
+    rows=d.payload?.[isDep?"departures":"arrivals"]||[];
+    render();
+  }catch(e){
+    $("board").innerHTML=`<tr><td colspan="5" class="msg">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function render(){
+  const isDep=mode==="dep";
+  if(!rows.length){$("board").innerHTML='<tr><td colspan="5" class="msg">Keine Einträge im Zeitfenster</td></tr>';return}
+  $("board").innerHTML=rows.map((d,i)=>{
+    const delay=d.delay_minutes||0;
+    const status=d.cancelled?'<span class="late">fällt aus</span>':delay>0?`<span class="late">+${delay}</span>`:'<span style="color:var(--ok)">pünktlich</span>';
+    const n=uniqMsgs(d.messages).length;
+    const msgs=n?`<div class="msgs">${n} Hinweis${n>1?"e":""}</div>`:"";
+    return `<tr class="row" data-i="${i}">
+      <td class="time ${d.cancelled?"cancel":""}">${tm(d.planned_time)}<div>${status}</div></td>
+      <td><span class="badge ${d.long_distance?"lf":""}">${esc(d.line||d.category||"?")}</span>
+          <div class="muted">${esc(d.category||"")} ${esc(d.train_number||"")}</div></td>
+      <td>${esc(isDep?d.destination:d.origin)}</td>
+      <td>${esc(d.platform||"–")}</td>
+      <td>${msgs}</td></tr>`;
+  }).join("");
+}
+
+$("board").onclick=e=>{
+  const tr=e.target.closest("tr.row");if(!tr)return;
+  const d=rows[+tr.dataset.i];
+  const isDep=mode==="dep";
+  const msgs=uniqMsgs(d.messages).map(x=>`<li><b>${esc(x.title)}</b>${x.n>1?` <span class="muted">×${x.n}</span>`:""}${x.time?` <span class="muted">· ${esc(x.time)}</span>`:""}</li>`).join("");
+  $("detail").innerHTML=`
+    <h2 style="margin:0 24px 6px 0">${esc(d.line||"")} ${isDep?"→":"←"} ${esc(isDep?d.destination:d.origin)}</h2>
+    <div class="kv">
+      <span>Kategorie</span><span>${esc(d.category||"–")}</span>
+      <span>Zugnummer</span><span>${esc(d.train_number||"–")}</span>
+      <span>Fernverkehr</span><span>${d.long_distance?"ja":"nein"}</span>
+      <span>Plan-${isDep?"Abfahrt":"Ankunft"}</span><span>${tm(d.planned_time)}</span>
+      <span>Verspätung</span><span>${d.cancelled?"fällt aus":(d.delay_minutes||0)+" min"}</span>
+      <span>Gleis</span><span>${esc(d.platform||"–")}</span>
+    </div>
+    <h3 style="margin:14px 0 4px;font-size:15px">Meldungen</h3>
+    ${msgs?`<ul>${msgs}</ul>`:'<div class="muted">Keine Meldungen</div>'}
+    <h3 style="margin:14px 0 4px;font-size:15px">Fahrzeug</h3>
+    <div class="muted">Zu diesem Zug sind keine Fahrzeug- oder Wagenreihungsdaten verfügbar.</div>`;
+  $("modal").hidden=false;
+};
+$("close").onclick=()=>$("modal").hidden=true;
+$("modal").onclick=e=>{if(e.target.id==="modal")$("modal").hidden=true};
+
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("on",x===b));
+  mode=b.dataset.mode;
+  if(eva) loadBoard();
+});
+</script>
+</body>
+</html>
