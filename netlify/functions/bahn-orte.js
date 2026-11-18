@@ -1,42 +1,36 @@
-// Proxy zur bahn.de-Ortssuche. Holt sich vorab Session-Cookies wie ein Browser.
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+// Bahnhofssuche über infranode. Stadt wird aus dem ersten Wort des Namens abgeleitet,
+// z. B. "Nürnberg Hbf" -> Stadt "nuernberg".
+const INFRA = "https://infranode.dev/api/v1";
+
+const json = (statusCode, obj) => ({
+  statusCode,
+  headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+  body: JSON.stringify(obj),
+});
+
+const toSlug = (s) =>
+  s.toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/[^a-z0-9-]/g, "");
 
 exports.handler = async (event) => {
-  const q = (event.queryStringParameters && event.queryStringParameters.suchbegriff) || "";
-  if (!q.trim()) {
-    return { statusCode: 400, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "suchbegriff fehlt" }) };
-  }
-  const base = { "user-agent": UA, "accept-language": "de-DE,de;q=0.9" };
+  const q = ((event.queryStringParameters && event.queryStringParameters.suchbegriff) || "").trim();
+  if (!q) return json(400, { error: "suchbegriff fehlt" });
 
-  // Schritt 1: Startseite aufrufen, um Cookies zu erhalten
-  let cookie = "";
-  try {
-    const home = await fetch("https://www.bahn.de/", { headers: { ...base, accept: "text/html" }, redirect: "follow" });
-    const sc = typeof home.headers.getSetCookie === "function" ? home.headers.getSetCookie() : [home.headers.get("set-cookie") || ""];
-    cookie = sc.filter(Boolean).map((c) => c.split(";")[0]).join("; ");
-  } catch (e) {
-    // ohne Cookies weitermachen
-  }
+  const city = toSlug(q.split(/[\s(]/)[0]);
+  if (!city) return json(400, { error: "kein Stadtname erkennbar" });
 
-  // Schritt 2: eigentliche Suche
-  const url = `https://www.bahn.de/web/api/reiseloesung/orte?suchbegriff=${encodeURIComponent(q)}&typ=ALL&limit=10`;
   try {
-    const r = await fetch(url, {
-      headers: {
-        ...base,
-        accept: "application/json",
-        origin: "https://www.bahn.de",
-        referer: "https://www.bahn.de/buchung/fahrplan/suche",
-        ...(cookie ? { cookie } : {}),
-      },
+    const r = await fetch(`${INFRA}/cities/${city}/stations?q=${encodeURIComponent(q)}&limit=20`, {
+      headers: { accept: "application/json" },
     });
-    const body = await r.text();
-    return {
-      statusCode: r.status,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      body,
-    };
+    const j = await r.json();
+    const d = j.data || {};
+    if (d.source_status === "disabled") return json(502, { error: "infranode: Quelle deaktiviert (Zugangsdaten?)" });
+
+    const p = d.payload || {};
+    const list = p.stations || p.items || Object.values(p).find(Array.isArray) || [];
+    // Format, das die Seite erwartet: name und extId (= EVA)
+    return json(200, list.map((s) => ({ name: s.name, extId: String(s.eva), type: "ST" })));
   } catch (e) {
-    return { statusCode: 502, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "bahn.de nicht erreichbar" }) };
+    return json(502, { error: "infranode nicht erreichbar" });
   }
 };
